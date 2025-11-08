@@ -1,416 +1,297 @@
 import * as anchor from "@coral-xyz/anchor";
-import { TOKEN_PROGRAM_ID, getOrCreateAssociatedTokenAccount, createAssociatedTokenAccountInstruction, getAssociatedTokenAddress, getAccount, createMintToInstruction, createInitializeMintInstruction } from "@solana/spl-token";
-import { LAMPORTS_PER_SOL, Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
+import {
+  TOKEN_PROGRAM_ID,
+  createInitializeMintInstruction,
+  createMintToInstruction,
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+  getOrCreateAssociatedTokenAccount,
+} from "@solana/spl-token";
 import { assert } from "chai";
-import { Transaction } from "@solana/web3.js";
+import { SystemProgram, Keypair, PublicKey, Transaction, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import type { Ico } from "../target/types/ico";
-import pkg from '@coral-xyz/anchor';
-const { Program, BN } = pkg;
+import BN from "bn.js";
 
-describe("ICO Program Tests", () => {
+describe("ICO Full Flow", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   // @ts-ignore
-  const program = anchor.workspace.Ico as Program<Ico>;
+  const program = anchor.workspace.Ico as anchor.Program<Ico>;
   const connection = provider.connection;
 
   const admin = provider.wallet.payer;
   const buyer = Keypair.generate();
 
+  const DECIMALS = 9;
+  const ONE_UNIT = new BN(10).pow(new BN(DECIMALS));
 
-  
-
+  // Mints
   let icoMint: Keypair;
-  let adminATA: PublicKey;
-  let buyerATA: PublicKey;
-  let icoATA: PublicKey;
-  let dataPDA: PublicKey;
-  let icoATABump: number;
-  let dataBump: number;
-
   let usdcMint: Keypair;
-  let buyerUSDCATA: PublicKey;
-  let adminUSDCATA: PublicKey;
 
-  const ICO_AMOUNT = new BN(10000);
-  const BUY_AMOUNT = 10 * 1_000_000_000; 
-  const TOKEN_DECIMALS = new BN(1_000_000_000);
+  // ATAs
+  let adminIcoAta: PublicKey;
+  let buyerIcoAta: PublicKey;
+  let adminUsdcAta: PublicKey;
+  let buyerUsdcAta: PublicKey;
+  let programIcoAta: PublicKey;
 
+  // PDAs
+  let dataPDA: PublicKey;
+  let icoBump: number;
+
+  // Config
+  const ICO_SUPPLY = new BN(10_000).mul(ONE_UNIT);
+  const PRICE_PER_TOKEN = new BN(1_000_000); // 0.001 stable
+  const USDC_BUY_AMOUNT = new BN(10).mul(ONE_UNIT);
   const now = Math.floor(Date.now() / 1000);
-  const START_TIME = new BN(now);
-  const END_TIME = new BN(now + 86400);
-  const INITIAL_PRICE = new BN(1_000_000_000 * 0.001); // lamports per token
+  const START_TIME = now - 60;
+  const END_TIME = now + 86400;
 
   before(async () => {
-
-
-       const Airdropped = 500000 * 2
-    const tx = new Transaction().add(
-      SystemProgram.transfer({
-        fromPubkey: admin.publicKey,
-        toPubkey: buyer.publicKey,
-        lamports: Airdropped * LAMPORTS_PER_SOL, // amount to send
-      })
+    // Airdrop buyer some SOL
+    await connection.confirmTransaction(
+      await connection.requestAirdrop(buyer.publicKey, 2 * LAMPORTS_PER_SOL)
     );
-    await program.provider.sendAndConfirm(tx, [admin]);
-    console.log("airdrop done to buyer");
-    
 
-    // 1️⃣ Create a mint
+    // Create ICO mint & USDC mint
     icoMint = Keypair.generate();
     usdcMint = Keypair.generate();
-    console.log("runing mint");
 
-
-    // mint presale token 
     const mintRent = await connection.getMinimumBalanceForRentExemption(82);
-    const mintTx = new anchor.web3.Transaction().add(
-      anchor.web3.SystemProgram.createAccount({
-        fromPubkey: admin.publicKey,
-        newAccountPubkey: icoMint.publicKey,
-        space: 82,
-        lamports: mintRent,
-        programId: TOKEN_PROGRAM_ID,
-      }),
-      createInitializeMintInstruction(
-        icoMint.publicKey,
-        9, // decimals
-        admin.publicKey,
-        admin.publicKey,
-        TOKEN_PROGRAM_ID,
-      )
-    );
-    await provider.sendAndConfirm(mintTx, [icoMint]);
+    const createMint = async (mint: Keypair) => {
+      const tx = new Transaction().add(
+        SystemProgram.createAccount({
+          fromPubkey: admin.publicKey,
+          newAccountPubkey: mint.publicKey,
+          space: 82,
+          lamports: mintRent,
+          programId: TOKEN_PROGRAM_ID,
+        }),
+        createInitializeMintInstruction(mint.publicKey, DECIMALS, admin.publicKey, null)
+      );
+      await provider.sendAndConfirm(tx, [mint]);
+    };
+    await createMint(icoMint);
+    await createMint(usdcMint);
 
-    console.log("done mint");
-    console.log("Create admin ATA");
-
-    // 2️⃣ Create admin ATA
-    const adminATAAccount = await getOrCreateAssociatedTokenAccount(
+    // Create ATAs
+    adminIcoAta = (await getOrCreateAssociatedTokenAccount(
       connection,
       admin,
       icoMint.publicKey,
       admin.publicKey
-    );
-    adminATA = adminATAAccount.address;
-    console.log(" 3️⃣ Mint tokens to admin");
-    // 3️⃣ Mint tokens to admin
-    await program.provider.sendAndConfirm(
-      new anchor.web3.Transaction().add(
-        createMintToInstruction(
-          icoMint.publicKey,
-          adminATA,
-          admin.publicKey,
-          10000 * 1_000_000_000,
-          [],
-          TOKEN_PROGRAM_ID,
-        )
-      )
-    );
-    console.log(" 3️⃣ finished presale ");
+    )).address;
 
-    console.log("Create USDC Token");
-    const usdcMintRent = await connection.getMinimumBalanceForRentExemption(82);
-    const usdcTx = new anchor.web3.Transaction().add(
-      anchor.web3.SystemProgram.createAccount({
-        fromPubkey: admin.publicKey,
-        newAccountPubkey: usdcMint.publicKey,
-        space: 82,
-        lamports: usdcMintRent,
-        programId: TOKEN_PROGRAM_ID,
-      }),
-      createInitializeMintInstruction(
-        usdcMint.publicKey,
-        9, // USDC usually has 6 decimals
-        admin.publicKey,
-        admin.publicKey,
-        TOKEN_PROGRAM_ID,
-      )
-    );
-    await provider.sendAndConfirm(usdcTx, [usdcMint]);
-
-
-    console.log("USDC done..");
-
-
-    console.log("create buyer ata for usdc,,");
-
-    // 2️⃣ Create buyer ATA
-    const userUSDCATAACCOUNT = await getOrCreateAssociatedTokenAccount(
+    buyerUsdcAta = (await getOrCreateAssociatedTokenAccount(
       connection,
-      buyer,
+      admin,
       usdcMint.publicKey,
       buyer.publicKey
-    );
-    buyerUSDCATA = userUSDCATAACCOUNT.address;  // buyer etr
-    console.log(" 3️⃣ Mint tokens to admin");
-    // 3️⃣ Mint tokens to admin
-    await program.provider.sendAndConfirm(
-      new anchor.web3.Transaction().add(
-        createMintToInstruction(
-          usdcMint.publicKey,
-          buyerUSDCATA,
-          admin.publicKey, // signer must match mint authority
-          100 * 1_000_000_000, // if decimals=6
-          [],
-          TOKEN_PROGRAM_ID
-        )
-      ),
-      [admin]
-    );
-    console.log("done usdc eta for buyer ");
+    )).address;
 
-
-    // 2️⃣ Create admin ATA
-    const adminUSDCATAACCOUNT = await getOrCreateAssociatedTokenAccount(
+    adminUsdcAta = (await getOrCreateAssociatedTokenAccount(
       connection,
       admin,
       usdcMint.publicKey,
       admin.publicKey
-    );
-    adminUSDCATA = adminUSDCATAACCOUNT.address;  // buyer etr
-    console.log(" 3️⃣ Mint tokens to admin");
-    // 3️⃣ Mint tokens to admin
-    await program.provider.sendAndConfirm(
-      new anchor.web3.Transaction().add(
-        createMintToInstruction(
-          usdcMint.publicKey,
-          adminUSDCATA,
-          admin.publicKey, // signer must match mint authority
-          100 * 1_000_000, // if decimals=6
-          [],
-          TOKEN_PROGRAM_ID
-        )
+    )).address;
+
+    // Mint ICO supply to admin
+    await provider.sendAndConfirm(
+      new Transaction().add(
+        createMintToInstruction(icoMint.publicKey, adminIcoAta, admin.publicKey, ICO_SUPPLY.toNumber())
       ),
       [admin]
     );
 
+    // Mint USDC to buyer
+    await provider.sendAndConfirm(
+      new Transaction().add(
+        createMintToInstruction(usdcMint.publicKey, buyerUsdcAta, admin.publicKey, USDC_BUY_AMOUNT.toNumber())
+      ),
+      [admin]
+    );
 
-  });
-
-  it("Initialize ICO ATA and PDA", async () => {
-    console.log("ico eta");
-
-
-    [icoATA] = PublicKey.findProgramAddressSync(
+    // Derive PDAs
+    [programIcoAta, icoBump] = PublicKey.findProgramAddressSync(
       [icoMint.publicKey.toBuffer()],
       program.programId
     );
-    console.log("data eta", icoATA);
-    [dataPDA, dataBump] = PublicKey.findProgramAddressSync(
+    [dataPDA] = PublicKey.findProgramAddressSync(
       [Buffer.from("data"), admin.publicKey.toBuffer()],
       program.programId
     );
+  });
 
+  it("Create ICO ATA + Initialize Data", async () => {
     await program.methods
-      .createIcoAta(ICO_AMOUNT, INITIAL_PRICE, START_TIME, END_TIME)
+      .createIcoAta(
+        new BN(ICO_SUPPLY),
+        new BN(PRICE_PER_TOKEN),
+        new BN(START_TIME),
+        new BN(END_TIME)
+      )
       .accounts({
-        icoAtaForIcoProgram: icoATA,
+        icoAtaForIcoProgram: programIcoAta,
         data: dataPDA,
         icoMint: icoMint.publicKey,
-        icoAtaForAdmin: adminATA,
+        icoAtaForAdmin: adminIcoAta,
         admin: admin.publicKey,
+        systemProgram: SystemProgram.programId,
         tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
         rent: anchor.web3.SYSVAR_RENT_PUBKEY,
       })
       .rpc();
 
-    const data = await program.account.data.fetch(dataPDA);
-
-    console.log(data, "created ico data");
-
-
-
+    const dataAcc = await program.account.data.fetch(dataPDA);
+    assert.equal(dataAcc.admin.toBase58(), admin.publicKey.toBase58());
+    assert.equal(dataAcc.totalTokens.toString(), ICO_SUPPLY.toString());
   });
 
-  it("Buyer purchases tokens from ICO", async () => {
-
- 
-
-    console.log("Airdropped  SOL to buyer");
-
-    console.log("Creating buyer ATA");
-
-    try {
-      buyerATA = await getAssociatedTokenAddress(
-        icoMint.publicKey,
-        buyer.publicKey
-      );
-
-      // 1️⃣ Build the transaction
-      const tx = new Transaction().add(
-        createAssociatedTokenAccountInstruction(
-          buyer.publicKey, // funding payer
-          buyerATA,        // ATA address
-          buyer.publicKey, // owner of ATA
-          icoMint.publicKey
-        )
-      );
-
-      // 2️⃣ Send & confirm with signers
-      await program.provider.sendAndConfirm(tx, [buyer]);
-      console.log("Buyer ATA created:", buyerATA.toBase58());
-    } catch (error) {
-      console.log(error);
-
-    }
-    console.log("icoATA", icoATA);
-
-    const [icoAtaPda, bump] = await PublicKey.findProgramAddress(
-      [icoMint.publicKey.toBuffer()],
-      program.programId
-    );
-
-
-    // Convert amount to raw amount with decimals
-    const rawBuyAmount = BUY_AMOUNT;
-
-    // Call buy_tokens (Anchor program)
+  it("Deposit additional ICO tokens", async () => {
+    const extra = new BN(100).mul(ONE_UNIT);
     await program.methods
-      .buyTokens(bump, new BN(rawBuyAmount))
+      .depositIcoInAta(extra)
       .accounts({
-        icoAtaForIcoProgram: icoATA,
+        icoAtaForIcoProgram: programIcoAta,
         data: dataPDA,
         icoMint: icoMint.publicKey,
-        icoAtaForUser: buyerATA,
-        user: buyer.publicKey,
-        uusdcAtaForUser: buyerUSDCATA,
-        usdcMint: usdcMint.publicKey,
-        usdcAtaForAdmin: adminUSDCATA,
+        icoAtaForAdmin: adminIcoAta,
         admin: admin.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .rpc();
+
+    const dataAcc = await program.account.data.fetch(dataPDA);
+    assert.equal(
+      dataAcc.totalTokens.toString(),
+      ICO_SUPPLY.add(extra).toString(),
+      "Deposit failed"
+    );
+  });
+
+  it("Withdraw ICO tokens", async () => {
+    const withdraw = new BN(50).mul(ONE_UNIT);
+    await program.methods
+      .withdrawIcoFromAta(withdraw)
+      .accounts({
+        icoAtaForIcoProgram: programIcoAta,
+        data: dataPDA,
+        icoMint: icoMint.publicKey,
+        icoAtaForAdmin: adminIcoAta,
+        admin: admin.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .rpc();
+
+    const dataAcc = await program.account.data.fetch(dataPDA);
+    assert.equal(
+      dataAcc.totalTokens.toString(),
+      ICO_SUPPLY.add(new BN(100).mul(ONE_UNIT)).sub(withdraw).toString()
+    );
+  });
+
+  it("Buyer buys tokens", async () => {
+    buyerIcoAta = await getAssociatedTokenAddress(icoMint.publicKey, buyer.publicKey);
+    const createAtaTx = new Transaction().add(
+      createAssociatedTokenAccountInstruction(
+        buyer.publicKey,
+        buyerIcoAta,
+        buyer.publicKey,
+        icoMint.publicKey
+      )
+    );
+    await provider.sendAndConfirm(createAtaTx, [buyer]);
+
+    const beforeBuyerUsdc = await connection.getTokenAccountBalance(buyerUsdcAta);
+
+    await program.methods
+      .buyTokens(icoBump, new BN(USDC_BUY_AMOUNT))
+      .accounts({
+        icoAtaForIcoProgram: programIcoAta,
+        data: dataPDA,
+        icoMint: icoMint.publicKey,
+        icoAtaForUser: buyerIcoAta,
+        user: buyer.publicKey,
+        usdcAtaForUser: buyerUsdcAta,
+        usdcMint: usdcMint.publicKey,
+        usdcAtaForAdmin: adminUsdcAta,
+        admin: admin.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        associatedTokenProgram: anchor.utils.token.ASSOCIATED_PROGRAM_ID,
       })
       .signers([buyer])
       .rpc();
 
-    console.log(`Buyer bought ${BUY_AMOUNT} tokens`);
-    // Fetch updated data
-    const data = await program.account.data.fetch(dataPDA);
+    const afterBuyerUsdc = await connection.getTokenAccountBalance(buyerUsdcAta);
+    assert.ok(
+      new BN(afterBuyerUsdc.value.amount).lt(new BN(beforeBuyerUsdc.value.amount)),
+      "Buyer USDC not reduced"
+    );
 
-
-    console.log("Admin:", data.admin.toBase58());
-    console.log("Total Tokens:", data.totalTokens.toString());
-    console.log("Tokens Sold:", data.tokensSold.toString());
-    console.log("Price per Token (Lamports):", data.pricePerToken.toString());
-    console.log("ICO Paused:", data.paused);
-    console.log("Start Time:", new Date(Number(data.startTime) * 1000).toLocaleString());
-    console.log("End Time:", new Date(Number(data.endTime) * 1000).toLocaleString());
-
-    //const totalTokensHuman = data.total_tokens.toNumber() / 1_000_000_000;
-    //const tokensSoldHuman = data.tokens_sold.toNumber() / 1_000_000_000;
-    //console.log("Updated tokens sold:", tokensSoldHuman, "of", totalTokensHuman);
-
-    // Check buyer ATA balance
-    const buyerBalance = await connection.getTokenAccountBalance(buyerATA);
-    console.log("Buyer token balance:", Number(buyerBalance.value.amount),buyerBalance);
+    const buyerIcoBal = await connection.getTokenAccountBalance(buyerIcoAta);
+    assert.ok(
+      new BN(buyerIcoBal.value.amount).gt(new BN(0)),
+      "Buyer ICO tokens not received"
+    );
   });
 
-  // it("Pauses the contract", async () => {
-  //   // Call the pause instruction
-  //   const tx = await program.methods
-  //     .setPause(true) // Use camelCase if your Rust instruction is `set_pause`
-  //     .accounts({
-  //       admin: provider.wallet.publicKey,
-  //       data: dataPDA, // ⬅️ include if your instruction modifies data in the PDA
-  //     }).rpc();
+  it("Admin updates price", async () => {
+    const newPrice = new BN(2_000_000);
+    await program.methods
+      .updatePrice(newPrice)
+      .accounts({
+        data: dataPDA,
+        admin: admin.publicKey,
+      })
+      .rpc();
 
-  //   console.log("Transaction Signature:", tx);
+    const dataAcc = await program.account.data.fetch(dataPDA);
+    assert.equal(dataAcc.pricePerToken.toString(), newPrice.toString());
+  });
 
-  //   // Fetch the updated ICO data
-  //   const data = await program.account.data.fetch(dataPDA);
-  //   console.log("ICO Paused:", data.paused);
+  it("Admin pauses and resumes ICO", async () => {
+    await program.methods
+      .setPause(true)
+      .accounts({ data: dataPDA, admin: admin.publicKey })
+      .rpc();
 
-  //   // Optional: add assertion to validate
-  //   assert.equal(data.paused, true, "ICO should be paused");
+    let dataAcc = await program.account.data.fetch(dataPDA);
+    assert.equal(dataAcc.paused, true, "Pause failed");
 
+    await program.methods
+      .setPause(false)
+      .accounts({ data: dataPDA, admin: admin.publicKey })
+      .rpc();
 
-  //   const txs = await program.methods
-  //     .setPause(false) // Use camelCase if your Rust instruction is `set_pause`
-  //     .accounts({
-  //       admin: provider.wallet.publicKey,
-  //       data: dataPDA, // ⬅️ include if your instruction modifies data in the PDA
-  //     }).rpc();
+    dataAcc = await program.account.data.fetch(dataPDA);
+    assert.equal(dataAcc.paused, false, "Unpause failed");
+  });
 
-  //   console.log("Transaction Signature:", txs);
+  it("Admin sets ICO time window", async () => {
+    const newStart = now - 100;
+    const newEnd = now + 200000;
+    await program.methods
+      .setIcoTime(new BN(newStart), new BN(newEnd))
+      .accounts({ data: dataPDA, admin: admin.publicKey })
+      .rpc();
 
+    const dataAcc = await program.account.data.fetch(dataPDA);
+    assert.equal(dataAcc.startTime.toString(), newStart.toString());
+    assert.equal(dataAcc.endTime.toString(), newEnd.toString());
+  });
 
-  // });
+  it("Admin changes admin", async () => {
+    const newAdmin = Keypair.generate().publicKey;
 
-  // it("Buyer purchases tokens from ICO if it's paused", async () => {
+    await program.methods
+      .changeAdmin(newAdmin)
+      .accounts({ admin: admin.publicKey, data: dataPDA })
+      .rpc();
 
-  //   const Airdropped = 500000 * 2
-  //   const tx = new Transaction().add(
-  //     SystemProgram.transfer({
-  //       fromPubkey: admin.publicKey,
-  //       toPubkey: buyer.publicKey,
-  //       lamports: Airdropped * LAMPORTS_PER_SOL, // amount to send
-  //     })
-  //   );
-  //   await program.provider.sendAndConfirm(tx, [admin]);
-
-  //   console.log("Airdropped  SOL to buyer");
-
-  //   console.log("Creating buyer ATA");
-
-  //   try {
-  //     buyerATA = await getAssociatedTokenAddress(
-  //       icoMint.publicKey,
-  //       buyer.publicKey
-  //     );
-  //     console.log("Buyer ATA created:", buyerATA.toBase58());
-  //   } catch (error) {
-  //     console.log(error);
-
-  //   }
-  //   console.log("icoATA", icoATA);
-
-  //   const [icoAtaPda, bump] = await PublicKey.findProgramAddress(
-  //     [icoMint.publicKey.toBuffer()],
-  //     program.programId
-  //   );
-
-
-  //   // Convert amount to raw amount with decimals
-  //   const rawBuyAmount = BUY_AMOUNT;
-
-  //   // Call buy_tokens (Anchor program)
-  //   await program.methods
-  //     .buyTokens(bump, new BN(rawBuyAmount))
-  //     .accounts({
-  //       icoAtaForIcoProgram: icoATA,
-  //       data: dataPDA,
-  //       icoMint: icoMint.publicKey,
-  //       icoAtaForUser: buyerATA,
-  //       user: buyer.publicKey,
-  //       admin: admin.publicKey,
-  //       tokenProgram: TOKEN_PROGRAM_ID,
-  //       systemProgram: anchor.web3.SystemProgram.programId,
-  //     })
-  //     .signers([buyer])
-  //     .rpc();
-
-  //   console.log(`Buyer bought ${BUY_AMOUNT} tokens`);
-  //   // Fetch updated data
-  //   const data = await program.account.data.fetch(dataPDA);
-
-
-  //   console.log("Admin:", data.admin.toBase58());
-  //   console.log("Total Tokens:", data.totalTokens.toString());
-  //   console.log("Tokens Sold:", data.tokensSold.toString());
-  //   console.log("Price per Token (Lamports):", data.pricePerToken.toString());
-  //   console.log("ICO Paused:", data.paused);
-  //   console.log("Start Time:", new Date(Number(data.startTime) * 1000).toLocaleString());
-  //   console.log("End Time:", new Date(Number(data.endTime) * 1000).toLocaleString());
-
-  //   //const totalTokensHuman = data.total_tokens.toNumber() / 1_000_000_000;
-  //   //const tokensSoldHuman = data.tokens_sold.toNumber() / 1_000_000_000;
-  //   //console.log("Updated tokens sold:", tokensSoldHuman, "of", totalTokensHuman);
-
-  //   // Check buyer ATA balance
-  //   const buyerBalance = await connection.getTokenAccountBalance(buyerATA);
-  //   console.log("Buyer token balance:", Number(buyerBalance.value.amount) / 1_000_000_000);
-  // });
-
+    const dataAcc = await program.account.data.fetch(dataPDA);
+    assert.equal(dataAcc.admin.toBase58(), newAdmin.toBase58(), "Admin not changed");
+  });
 });
